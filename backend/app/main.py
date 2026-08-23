@@ -1,12 +1,15 @@
 """
-Coffee Leaf AI — FastAPI backend entrypoint.
+LeafSense AI — FastAPI backend entrypoint.
 
-Loads the trained model once on startup and exposes:
-
+Provides:
 - /health
 - /analyze
 - /evaluate
 - /evaluate/latest
+
+Optimized for Render Free:
+- No model preloading at startup.
+- Model loads automatically on the first prediction request.
 """
 
 from __future__ import annotations
@@ -18,7 +21,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.models import model_loader
 from app.routes import analyze, evaluate, health
-from app.services.evaluation import run_default_evaluation
 from app.utils.logger import configure_logging
 
 # -------------------------------------------------------
@@ -33,17 +35,21 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------------
 
 app = FastAPI(
-    title="Coffee Leaf AI API",
-    description="Coffee Leaf Disease Detection & Severity Estimation Backend",
+    title="LeafSense AI API",
+    description="Universal Plant Leaf Disease Detection & Severity Estimation Backend",
     version="0.2.0",
 )
 
 # -------------------------------------------------------
-# CORS (GitHub Codespaces Frontend)
+# CORS
 # -------------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://leafsense-ai-spz7.onrender.com",
+    ],
     allow_origin_regex=r"https://.*-3000\.app\.github\.dev",
     allow_credentials=True,
     allow_methods=["*"],
@@ -63,30 +69,15 @@ app.include_router(evaluate.router)
 # -------------------------------------------------------
 
 @app.on_event("startup")
-def load_model_on_startup() -> None:
+def startup() -> None:
     """
-    Load the trained model once when FastAPI starts and
-    automatically evaluate the bundled validation dataset.
+    Keep startup lightweight for Render Free.
+
+    The model will be loaded automatically on the first
+    prediction request through model_loader.get_model().
     """
-
-    loaded = model_loader.try_preload()
-
-    if loaded:
-        logger.info("Startup: model preloaded successfully.")
-
-        try:
-            run_default_evaluation()
-            logger.info("Automatic validation evaluation completed.")
-        except Exception as exc:
-            logger.warning("Automatic evaluation skipped: %s", exc)
-
-    else:
-        logger.warning(
-            "Startup: model weights not loaded. "
-            "/analyze and /evaluate will not work until "
-            "backend/app/models/coffee_leaf_model.pth is available."
-        )
-
+    logger.info("LeafSense AI backend started successfully.")
+    logger.info("Model will be loaded on the first prediction request.")
 
 # -------------------------------------------------------
 # Root endpoint
@@ -95,7 +86,7 @@ def load_model_on_startup() -> None:
 @app.get("/")
 def root():
     return {
-        "service": "Coffee Leaf AI API",
+        "service": "LeafSense AI API",
         "status": "running",
         "model_loaded": model_loader.is_model_loaded(),
         "docs": "/docs",
