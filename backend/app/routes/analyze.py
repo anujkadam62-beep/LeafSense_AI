@@ -1,20 +1,22 @@
 """
 /analyze route.
 
-Flow: upload -> validate content-type -> save a copy to disk (for
-audit/debugging) -> preprocess -> run inference -> return JSON.
+Flow:
+    upload -> validate -> save upload -> run prediction -> return JSON.
 
 Status codes:
-    200 - success
-    400 - invalid/corrupted/unsupported image
-    500 - model not available or unexpected internal error
+    200 - Success
+    400 - Invalid or unsupported image
+    500 - Model unavailable or internal server error
 """
+
+from __future__ import annotations
 
 import logging
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.services.prediction import run_prediction
@@ -24,62 +26,98 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["analysis"])
 
+# Store uploaded files for debugging/audit
 UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
-MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10MB, matches the frontend's stated limit
+ALLOWED_CONTENT_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+
+MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
 @router.post("/analyze")
 async def analyze_leaf(file: UploadFile = File(...)):
     """
-    Accepts a coffee leaf image and returns disease detection,
-    confidence, severity, and the full class probability distribution.
+    Analyze a coffee leaf image.
+
+    Returns:
+        - predicted class
+        - confidence
+        - severity
+        - class probabilities
     """
-    # --- 1. Validate up front (cheap checks before touching the model) ---
+
+    # -------------------------------------------------------
+    # Validate content type
+    # -------------------------------------------------------
+
     if file.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported content type '{file.content_type}'. "
-            "Upload a JPG, PNG, or WEBP image.",
+            detail=(
+                f"Unsupported file type '{file.content_type}'. "
+                "Upload a JPG, PNG, or WEBP image."
+            ),
         )
+
+    # -------------------------------------------------------
+    # Read uploaded file
+    # -------------------------------------------------------
 
     contents = await file.read()
 
     if not contents:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded file is empty.",
+        )
 
     if len(contents) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
             status_code=400,
-            detail=f"File too large. Maximum size is {MAX_FILE_SIZE_BYTES // (1024 * 1024)}MB.",
+            detail="File too large. Maximum allowed size is 10 MB.",
         )
 
-    # --- 2. Archive the upload (best-effort; failure here shouldn't block analysis) ---
-    try:
-        file_id = uuid.uuid4().hex
-        destination = UPLOAD_DIR / f"{file_id}_{file.filename}"
-        destination.write_bytes(contents)
-    except OSError:
-        logger.warning("Could not save uploaded file to disk; continuing with in-memory bytes.")
+    # -------------------------------------------------------
+    # Save upload (best effort)
+    # -------------------------------------------------------
 
-    # --- 3. Preprocess + run inference ---
+    try:
+        safe_name = Path(file.filename).name if file.filename else "image"
+        destination = UPLOAD_DIR / f"{uuid.uuid4().hex}_{safe_name}"
+        destination.write_bytes(contents)
+
+        logger.info("Saved upload to %s", destination)
+
+    except OSError as exc:
+        logger.warning("Could not save uploaded image: %s", exc)
+
+    # -------------------------------------------------------
+    # Run prediction
+    # -------------------------------------------------------
+
     try:
         result = run_prediction(image_bytes=contents)
-        return result
+        return JSONResponse(status_code=200, content=result)
 
     except InvalidImageError as exc:
-        logger.info("Rejected invalid image upload: %s", exc)
+        logger.info("Invalid image rejected: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     except ModelNotAvailableError as exc:
-        logger.error("Model unavailable during /analyze: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
-
-    except Exception as exc:  # noqa: BLE001 - last line of defense
-        logger.exception("Unexpected error during analysis")
+        logger.error("Model unavailable: %s", exc)
         return JSONResponse(
             status_code=500,
-            content={"error": f"Internal error during analysis: {exc}"},
+            content={"error": str(exc)},
+        )
+
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Unexpected error during prediction")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Internal server error: {exc}"},
         )

@@ -2,12 +2,16 @@
 Prediction service.
 
 Pipeline:
-1. Preprocess image for the AI model.
-2. Run PyTorch inference.
-3. Segment the leaf.
-4. Detect affected region.
+1. Preprocess image.
+2. Load model lazily (first request only).
+3. Run PyTorch inference.
+4. Segment the leaf.
 5. Extract HSV, Shape, Texture and Edge features.
-6. Return a complete dashboard-ready response.
+6. Return a dashboard-ready response.
+
+Optimized for Render Free:
+- Torch is imported only when needed.
+- Model is loaded only on the first prediction.
 """
 
 from __future__ import annotations
@@ -15,9 +19,6 @@ from __future__ import annotations
 import base64
 import logging
 import time
-
-import torch
-import torch.nn.functional as F
 
 from app.models import model_loader
 from app.services.feature_extraction import extract_features
@@ -35,12 +36,11 @@ logger = logging.getLogger(__name__)
 
 SEVERITY_HIGH_THRESHOLD = 85.0
 SEVERITY_MODERATE_THRESHOLD = 60.0
-
 HEALTHY_LABEL = "healthy"
 
 
 def _estimate_severity(disease: str, confidence: float) -> str:
-    """Healthy leaves have no severity."""
+    """Estimate disease severity from prediction confidence."""
 
     if disease.lower() == HEALTHY_LABEL:
         return "None"
@@ -55,22 +55,35 @@ def _estimate_severity(disease: str, confidence: float) -> str:
 
 
 def _to_base64(image_bytes: bytes) -> str:
-    """Encode PNG bytes for frontend display."""
+    """Convert PNG bytes to Base64 for frontend display."""
     return base64.b64encode(image_bytes).decode("utf-8")
 
 
 def run_prediction(image_bytes: bytes) -> dict:
     """
-    Complete prediction pipeline.
+    Execute the complete prediction pipeline.
+
+    Returns:
+        Dictionary containing prediction, confidence,
+        severity, affected area, extracted features,
+        and processed images.
     """
+
+    # Lazy import keeps startup lighter on Render.
+    import torch
+    import torch.nn.functional as F
 
     start = time.perf_counter()
 
-    # -----------------------------------
-    # AI preprocessing
-    # -----------------------------------
+    # ---------------------------------------
+    # Preprocess image
+    # ---------------------------------------
 
     tensor = preprocess_image(image_bytes)
+
+    # ---------------------------------------
+    # Load model (only on first request)
+    # ---------------------------------------
 
     model = model_loader.get_model()
     device = model_loader.get_device()
@@ -79,14 +92,14 @@ def run_prediction(image_bytes: bytes) -> dict:
     tensor = tensor.to(device)
 
     logger.info(
-        "Prediction started (device=%s, input_shape=%s)",
+        "Prediction started (device=%s, shape=%s)",
         device,
         tuple(tensor.shape),
     )
 
-    # -----------------------------------
+    # ---------------------------------------
     # Model inference
-    # -----------------------------------
+    # ---------------------------------------
 
     with torch.no_grad():
         logits = model(tensor)
@@ -95,7 +108,6 @@ def run_prediction(image_bytes: bytes) -> dict:
     top_index = int(torch.argmax(probabilities).item())
 
     disease = labels[top_index]
-
     confidence = round(float(probabilities[top_index].item()) * 100, 1)
 
     probability_breakdown = {
@@ -105,9 +117,9 @@ def run_prediction(image_bytes: bytes) -> dict:
 
     severity = _estimate_severity(disease, confidence)
 
-    # -----------------------------------
-    # Segmentation
-    # -----------------------------------
+    # ---------------------------------------
+    # Leaf segmentation
+    # ---------------------------------------
 
     (
         original,
@@ -118,15 +130,15 @@ def run_prediction(image_bytes: bytes) -> dict:
         area_stats,
     ) = segment_leaf(image_bytes)
 
-    # -----------------------------------
-    # Feature Extraction
-    # -----------------------------------
+    # ---------------------------------------
+    # Feature extraction
+    # ---------------------------------------
 
     features = extract_features(segmented, leaf_mask)
 
-    # -----------------------------------
+    # ---------------------------------------
     # Encode images
-    # -----------------------------------
+    # ---------------------------------------
 
     segmented_b64 = _to_base64(encode_png(segmented))
     affected_b64 = _to_base64(encode_png(affected))
@@ -134,32 +146,28 @@ def run_prediction(image_bytes: bytes) -> dict:
     elapsed_ms = round((time.perf_counter() - start) * 1000)
 
     logger.info(
-        "Prediction completed: %s %.1f%% (%dms)",
+        "Prediction completed: %s (%.1f%%) in %d ms",
         disease,
         confidence,
         elapsed_ms,
     )
 
-    # -----------------------------------
-    # Final response
-    # -----------------------------------
+    # ---------------------------------------
+    # Response
+    # ---------------------------------------
 
     return {
         "prediction": disease.title(),
         "confidence": confidence,
         "severity": severity,
         "processing_time_ms": elapsed_ms,
-
         "probabilities": probability_breakdown,
-
         "affected_area": {
             "pixels": area_stats["affected_pixels"],
             "leaf_pixels": area_stats["leaf_pixels"],
             "percentage": area_stats["percentage"],
         },
-
         "features": features,
-
         "images": {
             "segmented": segmented_b64,
             "affected": affected_b64,
