@@ -1,0 +1,20 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+
+# Inference pipeline
+torch>=2.2
+torchvision>=0.17
+pillow>=10.4
+numpy>=1.26
+opencv-python>=4.10
+scikit-image>=0.24
+
+# Model evaluation pipeline (/evaluate)
+scikit-learn>=1.5
+matplotlib>=3.9
+scikit-learn
+matplotlib
+seaborn
+pillow
+timm
